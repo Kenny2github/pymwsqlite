@@ -1,8 +1,8 @@
 """
 A MediaWiki-style [1]_ wrapper around Python's SQLite3 [2]_ library.
 
-`Usage`_
-========
+`Example Usage`_
+================
 
 .. code-block:: python
 
@@ -126,10 +126,10 @@ class PyMWSQLite:
         query = query.format(cols, table)
         params = (params or {}).copy()
         if isinstance(conds, str):
-            query += ' ' + conds
+            query += ' WHERE ' + conds
         elif conds is not None:
             query += ' WHERE ' + ' AND '.join(
-                '{}{}:{}'.format(i[0], i[1], i[0])
+                '{0}{1}:{0}'.format(i[0], i[1])
                 for i in conds
             )
             params.update({i[0]: i[2] for i in conds})
@@ -146,16 +146,18 @@ class PyMWSQLite:
             params: Parameters = None
     ) -> Iterable[sql.Row]:
         """Select from a table. Returns an iterator over result rows.
+        Note: modifying the database while iterating over result rows
+        may result in undefined behavior.
 
-        ``table`` is the name of the table to select from. It is
-            directly substituted into the query.
+        ``table`` is a directly substituted table name.
         ``columns`` can be either a SQL-valid string list of columns
             to directly substitute into the query, (usually used for
             the * magic column), an iterable of column names to
             select from, or a mapping of column names to column
             aliases (where None means no alias).
-        ``conditions`` can be either a SQL-valid string, or an
-            ANDed iterable of 3-tuples (column name, operator, value)
+        ``conditions`` can be either a SQL-valid string (minus WHERE)
+            or an ANDed iterable of 3-tuples:
+            (column name, operator, value)
             to check.
         ``options`` is a SQL-valid string of modifiers to the SELECT
             statement.
@@ -204,6 +206,29 @@ class PyMWSQLite:
         return self.cursor.fetchone()
 
     @_check_open
+    def _insert(
+            self,
+            table: str,
+            columns: Iterable[str]
+    ) -> str:
+        values = ', '.join(':' + i for i in columns)
+        return f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({values})"
+
+    def insert(
+            self,
+            table: str,
+            values: Mapping[str, Any]
+    ) -> PyMWSQLite:
+        """Insert a row into a table.
+
+        ``table`` is a directly substituted table name.
+        ``rows`` is a mapping (e.g. a dict) of column names
+            (substituted directly) to column values.
+        """
+        query = self._insert(table, rows.keys())
+        self.cursor.execute(query, row)
+        return self
+
     def insertmany(
             self,
             table: str,
@@ -211,18 +236,70 @@ class PyMWSQLite:
     ) -> PyMWSQLite:
         """Insert multiple rows into a table.
 
-        ``table`` is the name of the table to insert into. It is
-            directly substituted into the query.
-        ``rows`` is an iterable of mappings (e.g. dicts) that specify
-            the values for each column. Specifying different columns
-            in different rows *will* break.
+        ``table`` is a directly substituted table name.
+        ``rows`` is an iterable of mappings valid for insert().
+            Specifying mappings with different columns between
+            different rows *will* break.
         """
-        query = 'INSERT INTO {} ({}) VALUES ({})'
-        columns = ', '.join(rows[0].keys())
-        values = ', '.join(':{}'.format(i) for i in rows[0].keys())
-        real_values = (tuple(row.values()) for row in rows)
-        query = query.format(table, columns, values)
+        query = self._insert(table, rows[0].keys())
+        real_values = rows
         self.cursor.executemany(query, real_values)
+        return self
+
+    def _update(
+            self,
+            table: str,
+            columns: Iterable[Union[str, Iterable[str]]],
+            conditions: Conditions
+    ) -> str:
+        sets = ('{0}=:{0}'.format(i) for i in columns)
+        if isinstance(conditions, str):
+            return f"UPDATE {table} SET {', '.join(sets)} WHERE {conditions}"
+        if conditions is not None:
+            query = f"UPDATE {table} SET {', '.join(sets)} WHERE "
+            query += ' AND '.join(
+                '{0}{1}:{0}'.format(i[0], i[1])
+                for i in conds
+            )
+            return query
+        return f"UPDATE {table} SET {', '.join(sets)}"
+
+    def update(
+            self,
+            table: str,
+            values: Mapping[str, Any],
+            conditions: Conditions = None
+    ) -> PyMWSQLite:
+        """Update a table with new values.
+
+        ``table`` is a directly substituted table name.
+        ``values`` is a mapping of column names (or tuples of column
+            names if one value applies to multiple columns) to set
+            to values to set them to.
+        ``conditions`` is a Conditions value, same as select()'s.
+        """
+        query = self._update(table, values.keys(), conditions)
+        self.cursor.execute(query, {
+            **values, **{
+                i[0]: i[2] for i in (conditions or ())
+            }
+        })
+        return self
+
+    def updatemany(
+            self,
+            table: str,
+            values: Iterable[Mapping[str, Any]],
+            conditions: Conditions = None
+    ) -> PyMWSQLite:
+        """Update a table with new values, many times.
+        Parameters are the same as update().
+        Specifying different columns in different mappings
+        *will* break things.
+        """
+        query = self._update(table, values.keys(), conditions)
+        condvals = {i[0]: i[2] for i in (conditions or ())}
+        self.cursor.executemany(query, ({**val, **condvals} for val in values))
         return self
 
     @_check_open
