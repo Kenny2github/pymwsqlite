@@ -94,15 +94,31 @@ class PyMWSQLite:
         """
         if self.conn is not None:
             if close_existing:
-                self.conn.commit()
-                self.conn.close()
-                self.conn = self.cursor = None
+                self.close()
             else:
                 raise ValueError('Attempt to open new connection when '
                                  'existing one is not yet closed.')
         self.conn = sql.connect(*sql_args, **sql_kwargs)
         self.conn.row_factory = sql.Row
         self.cursor = self.conn.cursor()
+
+    def close(self):
+        """Close the connection. Further operations on the database
+        will raise an exception.
+        """
+        self.conn.commit()
+        self.conn.close()
+        self.conn = self.cursor = None
+
+    def __enter__(self):
+        """Use the database as a context manager."""
+        return self
+
+    def __exit__(self, *_):
+        """Exit the context.
+        Note: This does NOT close the database, only commits it!
+        """
+        self.conn.commit()
 
     @_check_open
     def _select(
@@ -205,6 +221,7 @@ class PyMWSQLite:
         """
         return self.cursor.fetchone()
 
+    #pylint: disable=no-self-use
     @_check_open
     def _insert(
             self,
@@ -213,11 +230,12 @@ class PyMWSQLite:
     ) -> str:
         values = ', '.join(':' + i for i in columns)
         return f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({values})"
+    #pylint: enable=no-self-use
 
     def insert(
             self,
             table: str,
-            values: Mapping[str, Any]
+            rows: Mapping[str, Any]
     ) -> PyMWSQLite:
         """Insert a row into a table.
 
@@ -226,7 +244,7 @@ class PyMWSQLite:
             (substituted directly) to column values.
         """
         query = self._insert(table, rows.keys())
-        self.cursor.execute(query, row)
+        self.cursor.execute(query, rows)
         return self
 
     def insertmany(
@@ -242,10 +260,11 @@ class PyMWSQLite:
             different rows *will* break.
         """
         query = self._insert(table, rows[0].keys())
-        real_values = rows
-        self.cursor.executemany(query, real_values)
+        self.cursor.executemany(query, rows)
         return self
 
+    #pylint: disable=no-self-use
+    @_check_open
     def _update(
             self,
             table: str,
@@ -259,10 +278,11 @@ class PyMWSQLite:
             query = f"UPDATE {table} SET {', '.join(sets)} WHERE "
             query += ' AND '.join(
                 '{0}{1}:{0}'.format(i[0], i[1])
-                for i in conds
+                for i in conditions
             )
             return query
         return f"UPDATE {table} SET {', '.join(sets)}"
+    #pylint: enable=no-self-use
 
     def update(
             self,
@@ -324,4 +344,37 @@ class PyMWSQLite:
             columns = ', '.join(columns)
         query = query.format(table_name, columns)
         self.cursor.execute(query)
+        return self
+
+    @_check_open
+    def delete(
+            self,
+            table: str,
+            conditions: Conditions = None
+    ) -> PyMWSQLite:
+        """Delete from a table.
+
+        ``table`` is a directly substituted table name.
+        ``conditions`` is a Conditions value, same as select()'s.
+        """
+        query = 'DELETE FROM ' + table
+        params = {}
+        if isinstance(conditions, str):
+            query += ' WHERE ' + conditions
+        elif conditions is not None:
+            query += ' WHERE ' + ' AND '.join(
+                '{0}{1}:{0}'.format(i[0], i[1])
+                for i in conditions
+            )
+            params = {i[0]: i[2] for i in conditions}
+        self.cursor.execute(query, params)
+        return self
+
+    @_check_open
+    def drop_table(self, table_name: str) -> PyMWSQLite:
+        """Delete an entire table.
+
+        ``table_name`` is the name of the table to delete.
+        """
+        self.cursor.execute('DROP TABLE ' + table_name)
         return self
